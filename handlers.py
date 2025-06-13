@@ -17,11 +17,11 @@ from state import STATE
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 
 
-async def register_handlers(client):
+def register_handlers(client)
     # ── /search command ────────────────────────────────────────────────
     @client.on(events.NewMessage(
         pattern=r'^/search(?:@[\w_]+)?(?:\s+(.+))?',
-        incoming=True  # only incoming messages now
+        incoming=True
     ))
     async def search_handler(event):
         query = (event.pattern_match.group(1) or "").strip()
