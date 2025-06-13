@@ -18,6 +18,15 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 
 
 def register_handlers(client):
+    # ── /start command ────────────────────────────────────────────────
+    @client.on(events.NewMessage(pattern=r'^/start$', incoming=True))
+    async def start_handler(event):
+        await event.reply(
+            "👋 Hi! I’m your Hianime Downloader bot.\n"
+            "Use `/search <anime name>` to find and download episodes.",
+            parse_mode="markdown"
+        )
+
     # ── /search command ────────────────────────────────────────────────
     @client.on(events.NewMessage(
         pattern=r'^/search(?:@[\w_]+)?(?:\s+(.+))?',
