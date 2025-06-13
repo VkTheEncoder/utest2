@@ -7,7 +7,7 @@ from handlers import register_handlers
 
 logging.basicConfig(level=logging.INFO)
 
-client = TelegramClient("hianime", API_ID, API_HASH)
+client = TelegramClient("bot", API_ID, API_HASH)
 
 async def main():
     await client.start(bot_token=BOT_TOKEN)
