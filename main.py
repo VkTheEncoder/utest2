@@ -14,7 +14,7 @@ logging.basicConfig(
 
 async def main():
     # 1) use a persistent session file named "bot.session"
-    client = TelegramClient("bot", API_ID, API_HASH)
+    client = TelegramClient("session/bot", API_ID, API_HASH)
     register_handlers(client)
 
     # 2) retry start() if we hit FloodWaitError
