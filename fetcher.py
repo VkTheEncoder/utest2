@@ -1,135 +1,127 @@
-# fetcher.py
+# utest2/fetcher.py
 
 import logging
 import requests
 from config import API_BASE
 
-# Ensure no trailing slash so we never get “//” in our URLs
-BASE = API_BASE.rstrip('/')
+# Strip any trailing “/” so we never get “//” in our URLs
+BASE = API_BASE.rstrip("/")
 
-def _extract_id(raw_id):
-    """
-    Turn a Mongo-style ObjectId dict into its string, or else just str(raw_id).
-    """
-    if isinstance(raw_id, dict):
-        for key in ("$oid", "id", "value"):
-            if key in raw_id:
-                return raw_id[key]
-        return str(raw_id)
-    return str(raw_id)
-
-def _normalize_list_of_lists(raw):
-    """
-    Normalize search results shaped as [[id,name,poster,...], …]
-    or list of dicts, into list of dicts with keys "id","name","poster".
-    """
-    out = []
-    for item in raw:
-        if isinstance(item, list) and len(item) >= 2:
-            id_, name, *rest = item
-            out.append({
-                "id":     _extract_id(id_),
-                "name":   name,
-                "poster": rest[0] if rest else ""
-            })
-        elif isinstance(item, dict):
-            item_id = _extract_id(item.get("id") or item.get("_id"))
-            out.append({
-                **item,
-                "id":     item_id,
-                "poster": item.get("poster", "")
-            })
-    return out
 
 def search_anime(query: str, page: int = 1):
     """
-    Search for anime by query string, returning a list of dicts
-    with keys: id, name, poster.
+    Search for anime by name via the HiAnime API.
+    Returns a list of dicts:
+      [ { "id": slug,
+          "name": human‐readable title,
+          "url": "https://hianimez.to/watch/{slug}",
+          "poster": poster_url_or_empty_string
+        }, … ]
     """
     url = f"{BASE}/search"
+    params = {"q": query, "page": page}
+
     try:
-        resp = requests.get(url, params={"q": query, "page": page})
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
     except requests.RequestException as e:
-        logging.error("search_anime failed for query %r: %s", query, e)
+        logging.error("search_anime failed for %r: %s", query, e)
         return []
 
-    data = resp.json().get("data", [])
-    raw  = list(data.values()) if isinstance(data, dict) else data
-    return _normalize_list_of_lists(raw)
+    full_json = resp.json()
+    logger_data = full_json.get("data", {})
+    anime_list = logger_data.get("animes", []) or []
+
+    results = []
+    for item in anime_list:
+        # sometimes hianime returns a bare slug string
+        if isinstance(item, str):
+            slug = item
+            title = slug.replace("-", " ").title()
+            poster = ""
+        elif isinstance(item, dict):
+            slug   = item.get("id", "") or item.get("slug", "")
+            title  = item.get("name") or item.get("jname") or slug.replace("-", " ").title()
+            poster = item.get("poster") or item.get("image") or ""
+        else:
+            continue
+
+        if not slug:
+            continue
+
+        anime_url = f"https://hianimez.to/watch/{slug}"
+        results.append({
+            "id":     slug,
+            "name":   title,
+            "url":    anime_url,
+            "poster": poster
+        })
+
+    return results
+
 
 def fetch_episodes(anime_id: str):
     """
-    Fetch /anime/<anime_id>/episodes and normalize to a list of
-    dicts with keys: episodeId, number, title.
+    Given an anime slug (e.g. "raven-of-the-inner-palace-18168"), fetch
+    /anime/{slug}/episodes and return a list of dicts:
+      [ { "episodeId": "<slug>?ep=N",
+          "number":    "N",
+          "title":     <subtitle or None>
+        }, … ]
+    Falls back to a single episode if the list endpoint 404s.
     """
-    url = f"{BASE}/anime/{anime_id}/episodes"
+    slug       = anime_id.strip()
+    ep_list_url = f"{BASE}/anime/{slug}/episodes"
+
     try:
-        resp = requests.get(url)
-        resp.raise_for_status()
+        resp = requests.get(ep_list_url, timeout=10)
     except requests.RequestException as e:
-        logging.error("fetch_episodes failed for anime_id %r: %s", anime_id, e)
+        logging.error("fetch_episodes request failed for %r: %s", anime_id, e)
         return []
 
-    raw = resp.json().get("data", []) or []
-    episodes = []
+    # single‐episode fallback
+    if resp.status_code == 404:
+        return [{"episodeId": f"{slug}?ep=1", "number": "1", "title": None}]
 
-    # Case A: dict mapping raw_id → info (info may be dict or primitive)
-    if isinstance(raw, dict):
-        for raw_id, info in raw.items():
-            if isinstance(info, dict):
-                number = info.get("number")
-                title  = info.get("title")
-            else:
-                number = info
-                title  = None
-            episodes.append({
-                "episodeId": _extract_id(raw_id),
-                "number":    number,
-                "title":     title,
-            })
+    try:
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        logging.error("fetch_episodes status error for %r: %s", anime_id, e)
+        return []
 
-    # Case B: list of various shapes
-    elif isinstance(raw, list):
-        for item in raw:
-            # B1: simple list of strings/ints
-            if isinstance(item, (str, int)):
-                episodes.append({
-                    "episodeId": _extract_id(item),
-                    "number":    None,
-                    "title":     None,
-                })
+    full_json     = resp.json()
+    episodes_data = full_json.get("data", {}).get("episodes", []) or []
+    episodes      = []
 
-            # B2: nested list [ raw_id, number, title, … ]
-            elif isinstance(item, list) and len(item) >= 3:
-                raw_id, number, title = item[0], item[1], item[2]
-                episodes.append({
-                    "episodeId": _extract_id(raw_id),
-                    "number":    number,
-                    "title":     title,
-                })
+    for item in episodes_data:
+        # each item is expected to be a dict with keys "number" and "episodeId"
+        if not isinstance(item, dict):
+            continue
 
-            # B3: list of dicts [{ episodeId, number, title, … }, …]
-            elif isinstance(item, dict):
-                raw_id = item.get("episodeId") or item.get("id") or item.get("_id")
-                episodes.append({
-                    "episodeId": _extract_id(raw_id),
-                    "number":    item.get("number"),
-                    "title":     item.get("title"),
-                })
+        ep_num = str(item.get("number") or "").strip()
+        ep_id  = str(item.get("episodeId") or item.get("id") or "").strip()
+        if not ep_num or not ep_id:
+            continue
 
-            else:
-                logging.warning("Skipping unknown episode format: %r", item)
+        episodes.append({
+            "episodeId": ep_id,
+            "number":    ep_num,
+            "title":     item.get("title")    # may be None
+        })
 
-    else:
-        logging.warning("Unexpected type for episodes data: %s", type(raw))
+    # Sort by numeric episode number just to be safe
+    try:
+        episodes.sort(key=lambda e: int(e["number"]))
+    except Exception:
+        pass
 
     return episodes
 
+
 def fetch_sources_and_referer(episode_id: str):
     """
-    Fetch video sources + referer for an episode.
-    Returns: (sources_list, referer_str)
+    Fetch /episode/{episode_id}/sources
+    Returns a tuple (sources_list, referer_str)
     """
     url = f"{BASE}/episode/{episode_id}/sources"
     resp = requests.get(url)
@@ -137,13 +129,13 @@ def fetch_sources_and_referer(episode_id: str):
     blob = resp.json().get("data", {}) or {}
     return blob.get("sources", []), blob.get("referer", "")
 
+
 def fetch_tracks(episode_id: str):
     """
-    Fetch subtitle tracks for an episode.
-    Returns list of track dicts.
+    Fetch /episode/{episode_id}/tracks
+    Returns list of subtitle track dicts.
     """
     url = f"{BASE}/episode/{episode_id}/tracks"
     resp = requests.get(url)
     resp.raise_for_status()
-    data = resp.json().get("data", [])
-    return data or []
+    return resp.json().get("data", []) or []
