@@ -5,7 +5,12 @@ import logging
 import asyncio
 
 from telethon import events, Button
-from fetcher import search_anime, fetch_episodes, fetch_sources_and_referer, fetch_tracks
+from fetcher import (
+    search_anime,
+    fetch_episodes,
+    fetch_sources_and_referer,
+    fetch_tracks,
+)
 from downloader import remux_hls, download_subtitle
 from state import STATE
 
@@ -16,7 +21,7 @@ async def register_handlers(client):
     # ── /search command ────────────────────────────────────────────────
     @client.on(events.NewMessage(
         pattern=r'^/search(?:@[\w_]+)?(?:\s+(.+))?',
-        incoming=True, outgoing=True
+        incoming=True  # only incoming messages now
     ))
     async def search_handler(event):
         query = (event.pattern_match.group(1) or "").strip()
@@ -35,38 +40,32 @@ async def register_handlers(client):
         if not isinstance(results, list):
             return await event.reply("⚠️ Unexpected API response format.")
 
-        # Clean and cast names to str
         clean = []
         for r in results:
             aid = r.get("id")
-            raw_name = r.get("name", "")
-            name = raw_name if isinstance(raw_name, str) else str(raw_name)
-            if aid and name:
+            name = r.get("name", "")
+            if aid and isinstance(name, str) and name:
                 clean.append((aid, name))
 
         if not clean:
             return await event.reply("🔍 No valid results found.")
 
-        # Take up to 5 results
         choices = clean[:5]
-
-        # Store id→name mapping in STATE
         chat = event.chat_id
-        STATE.setdefault(chat, {})["anime_meta"] = {aid: nm for aid, nm in choices}
+        STATE.setdefault(chat, {})["anime_meta"] = {
+            aid: nm for aid, nm in choices
+        }
 
-        # Build inline buttons
         buttons = [
             [Button.inline(name, data=f"ANIME|{aid}".encode())]
             for aid, name in choices
         ]
-
-        await event.reply(
-            "🔍 Select an anime:",
-            buttons=buttons
-        )
+        await event.reply("🔍 Select an anime:", buttons=buttons)
 
     # ── Anime selected: list episodes ────────────────────────────────────
-    @client.on(events.CallbackQuery(data=lambda d: d and d.startswith(b"ANIME|")))
+    @client.on(events.CallbackQuery(
+        data=lambda d: d and d.startswith(b"ANIME|")
+    ))
     async def on_select_anime(event):
         await event.answer()
         anime_id = event.data.decode().split("|", 1)[1]
@@ -85,17 +84,15 @@ async def register_handlers(client):
                 parse_mode="markdown"
             )
 
-        if not isinstance(eps, list) or not eps:
+        if not eps:
             return await event.edit("⚠️ No episodes found.")
 
-        # Queue episode IDs and map them to numbers
         state["queue"] = [e["episodeId"] for e in eps if "episodeId" in e]
         state["episodes_map"] = {
             e["episodeId"]: e.get("number", "")
             for e in eps if "episodeId" in e
         }
 
-        # Build buttons for each episode + Download All
         buttons = [
             [Button.inline(
                 f"{e.get('number','?')}. {e.get('title','')}",
@@ -113,7 +110,9 @@ async def register_handlers(client):
         )
 
     # ── Single‐episode download ───────────────────────────────────────────
-    @client.on(events.CallbackQuery(data=lambda d: d and d.startswith(b"EP|")))
+    @client.on(events.CallbackQuery(
+        data=lambda d: d and d.startswith(b"EP|")
+    ))
     async def on_single_episode(event):
         await event.answer()
         episode_id = event.data.decode().split("|", 1)[1]
@@ -122,7 +121,9 @@ async def register_handlers(client):
         )
 
     # ── Download All ─────────────────────────────────────────────────────
-    @client.on(events.CallbackQuery(data=lambda d: d and d.startswith(b"ALL|")))
+    @client.on(events.CallbackQuery(
+        data=lambda d: d and d.startswith(b"ALL|")
+    ))
     async def on_all(event):
         await event.answer()
         chat  = event.chat_id
@@ -151,10 +152,8 @@ async def _download_episode(client, chat_id, episode_id, ctx_event=None):
         out_dir = os.path.join(DOWNLOAD_DIR, safe_name)
         os.makedirs(out_dir, exist_ok=True)
 
-        # 1) Remux video
         sources, referer = fetch_sources_and_referer(episode_id)
 
-        # ——— Guard against no sources returned ———
         if not sources:
             logging.error("No video sources found for episode %s", episode_id)
             await ctx_event.reply(
@@ -162,27 +161,24 @@ async def _download_episode(client, chat_id, episode_id, ctx_event=None):
             )
             return
 
-        # ——— Pick the first source, but verify it has a URL or file ———
-        first_source = sources[0]
-        m3u8 = first_source.get("url") or first_source.get("file")
+        first = sources[0]
+        m3u8 = first.get("url") or first.get("file")
         if not m3u8:
             logging.error(
                 "Source entry missing 'url'/'file' for episode %s: %r",
-                episode_id, first_source
+                episode_id, first
             )
             await ctx_event.reply(
-                f"⚠️ Found a source for episode {ep_num}, but it has no URL."
+                f"⚠️ Found a source for ep {ep_num}, but it has no URL."
             )
             return
 
-        out_mp4  = os.path.join(out_dir, f"{safe_name} ep-{ep_num}.mp4")
+        out_mp4 = os.path.join(out_dir, f"{safe_name} ep-{ep_num}.mp4")
         await asyncio.get_event_loop().run_in_executor(
             None, remux_hls, m3u8, referer, out_mp4
         )
 
-        # 2) Download subtitle by priority
-        tracks   = fetch_tracks(episode_id)
-        sub_path = None
+        tracks, sub_path = fetch_tracks(episode_id), None
         for want in ("eng-2.vtt", "en.vtt", "eng.vtt", "english.vtt"):
             for tr in tracks:
                 url = tr.get("file") or tr.get("url", "")
@@ -195,14 +191,12 @@ async def _download_episode(client, chat_id, episode_id, ctx_event=None):
             if sub_path:
                 break
 
-        # 3) Send video
         await client.send_file(
             chat_id, out_mp4,
             caption=f"▶️ **{anime_name}** ep-{ep_num}",
             parse_mode="markdown"
         )
 
-        # 4) Send subtitle if found
         if sub_path and os.path.exists(sub_path):
             await client.send_file(
                 chat_id, sub_path,
@@ -217,7 +211,6 @@ async def _download_episode(client, chat_id, episode_id, ctx_event=None):
             f"❌ Failed downloading **{anime_name}** ep-{ep_num}"
         )
     finally:
-        # Clean up the “downloading…” status message
         await status.delete()
 
 
