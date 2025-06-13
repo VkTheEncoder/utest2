@@ -17,7 +17,7 @@ from state import STATE
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 
 
-def register_handlers(client)
+def register_handlers(client):
     # ── /search command ────────────────────────────────────────────────
     @client.on(events.NewMessage(
         pattern=r'^/search(?:@[\w_]+)?(?:\s+(.+))?',
