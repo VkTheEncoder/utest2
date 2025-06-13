@@ -12,6 +12,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 
+@client.on(events.NewMessage(pattern=r'^/start$', incoming=True))
+async def start_handler(event):
+    await event.reply("👋 Hi! Send me `/search <anime name>` to get started.")
+
+
 async def main():
     # 1) use a persistent session file named "bot.session"
     client = TelegramClient("session/bot", API_ID, API_HASH)
