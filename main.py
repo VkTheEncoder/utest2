@@ -13,29 +13,31 @@ logging.basicConfig(
 )
 
 async def main():
-    # 1) use a persistent session file named "bot.session"
-    client = TelegramClient("session/bot", API_ID, API_HASH)
+    # 1) persistent session file named "bot.session" in /app (from docker-compose mount)
+    client = TelegramClient("bot", API_ID, API_HASH)
     register_handlers(client)
 
-    # 2) retry start() if we hit FloodWaitError
-    while True:
-        try:
-            await client.start(bot_token=BOT_TOKEN)
-            logging.info("✅ Bot started successfully")
-            break
-        except errors.FloodWaitError as e:
-            # e.seconds tells you how long to wait
-            wait = getattr(e, "seconds", 60)
-            logging.warning(f"⚠️ FloodWaitError: sleeping for {wait}s before retry")
-            await asyncio.sleep(wait)
-        except Exception as e:
-            logging.exception("Unexpected error during start()")
-            # optional back-off before retry
-            await asyncio.sleep(30)
+    # 2) connect without importing
+    await client.connect()
 
-    # 3) run until disconnected
+    # 3) only sign_in if not already authorized
+    if not await client.is_user_authorized():
+        while True:
+            try:
+                await client.sign_in(bot_token=BOT_TOKEN)
+                logging.info("✅ Bot signed in successfully")
+                break
+            except errors.FloodWaitError as e:
+                wait = e.seconds or 60
+                logging.warning(f"⚠️ FloodWait on sign_in: sleeping {wait}s")
+                await asyncio.sleep(wait)
+            except Exception:
+                logging.exception("Unexpected error during sign_in")
+                await asyncio.sleep(30)
+
+    # 4) now run handlers until the bot disconnects
+    logging.info("🚀 Bot is up and running")
     await client.run_until_disconnected()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
