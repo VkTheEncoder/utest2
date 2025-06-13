@@ -4,43 +4,47 @@ import logging
 import requests
 from config import API_BASE
 
-# Make sure we never build URLs with “//”
+# Ensure we never build URLs with a trailing “//”
 BASE = API_BASE.rstrip("/")
 
 
-def _split_episode_id(ep_id: str):
-    """
-    Split "slug?ep=123" → ("slug", {"ep": "123"})
-    or just return (ep_id, {}) if there's no "?".
-    """
-    if "?" not in ep_id:
-        return ep_id, {}
-    slug, qs = ep_id.split("?", 1)
-    params = dict(part.split("=",1) for part in qs.split("&") if "=" in part)
-    return slug, params
-
-
 def search_anime(query: str, page: int = 1):
+    """
+    Search for anime by name via the HiAnime API.
+    Returns a list of dicts:
+      [ { "id": slug,
+          "name": human-readable title,
+          "url":  "https://hianimez.to/watch/{slug}",
+          "poster": poster_url_or_empty_string
+        }, … ]
+    """
     url = f"{BASE}/search"
+    params = {"q": query, "page": page}
+
     try:
-        resp = requests.get(url, params={"q": query, "page": page}, timeout=10)
+        resp = requests.get(url, params=params, timeout=10)
         resp.raise_for_status()
     except requests.RequestException as e:
         logging.error("search_anime failed for %r: %s", query, e)
         return []
 
-    data = resp.json().get("data", {}) or {}
+    full_json = resp.json()
+    data      = full_json.get("data", {}) or {}
     anime_list = data.get("animes", []) or []
 
     results = []
     for item in anime_list:
         if isinstance(item, str):
-            slug = item
-            title = slug.replace("-", " ").title()
+            slug   = item
+            title  = slug.replace("-", " ").title()
             poster = ""
         elif isinstance(item, dict):
             slug   = item.get("id") or item.get("slug") or ""
-            title  = item.get("name") or item.get("jname") or slug.replace("-", " ").title()
+            title  = (
+                item.get("name")
+                or item.get("jname")
+                or slug.replace("-", " ").title()
+            )
             poster = item.get("poster") or item.get("image") or ""
         else:
             continue
@@ -59,6 +63,11 @@ def search_anime(query: str, page: int = 1):
 
 
 def fetch_episodes(anime_id: str):
+    """
+    Given an anime slug, fetch /anime/{slug}/episodes and normalize to:
+      [ { "episodeId": "<slug>?ep=N", "number": "N", "title": <subtitle or None> }, … ]
+    Falls back to a single-episode if that endpoint 404s.
+    """
     slug = anime_id.strip()
     url  = f"{BASE}/anime/{slug}/episodes"
 
@@ -68,7 +77,7 @@ def fetch_episodes(anime_id: str):
         logging.error("fetch_episodes request failed for %r: %s", anime_id, e)
         return []
 
-    # fallback to ep=1 if there's no episode list
+    # single-episode fallback
     if resp.status_code == 404:
         return [{"episodeId": f"{slug}?ep=1", "number": "1", "title": None}]
 
@@ -78,23 +87,25 @@ def fetch_episodes(anime_id: str):
         logging.error("fetch_episodes status error for %r: %s", anime_id, e)
         return []
 
-    full = resp.json()
-    items = full.get("data", {}).get("episodes", []) or []
-    episodes = []
-    for it in items:
-        if not isinstance(it, dict):
+    full_json     = resp.json()
+    episodes_data = full_json.get("data", {}).get("episodes", []) or []
+    episodes      = []
+
+    for item in episodes_data:
+        if not isinstance(item, dict):
             continue
-        num = str(it.get("number") or "").strip()
-        eid = str(it.get("episodeId") or it.get("id") or "").strip()
+        num = str(item.get("number") or "").strip()
+        eid = str(item.get("episodeId") or item.get("id") or "").strip()
         if not num or not eid:
             continue
+
         episodes.append({
             "episodeId": eid,
             "number":    num,
-            "title":     it.get("title")
+            "title":     item.get("title")    # may be None
         })
 
-    # sort by N
+    # Sort numerically just in case
     try:
         episodes.sort(key=lambda e: int(e["number"]))
     except Exception:
@@ -104,8 +115,21 @@ def fetch_episodes(anime_id: str):
 
 
 def fetch_sources_and_referer(episode_id: str):
-    slug, params = _split_episode_id(episode_id)
-    url = f"{BASE}/episode/{slug}/sources"
+    """
+    Hit the HiAnime-style source endpoint:
+      GET /episode/sources
+      ?animeEpisodeId=<slug>?ep=N
+      &server=hd-2
+      &category=sub
+
+    Returns: (list_of_source_dicts, referer_string)
+    """
+    url = f"{BASE}/episode/sources"
+    params = {
+        "animeEpisodeId": episode_id,
+        "server":         "hd-2",   # force SUB HD-2 (1080p)
+        "category":       "sub"
+    }
 
     try:
         resp = requests.get(url, params=params, timeout=15)
@@ -114,29 +138,24 @@ def fetch_sources_and_referer(episode_id: str):
         logging.error("fetch_sources_and_referer failed for %r: %s", episode_id, e)
         return [], ""
 
-    payload = resp.json()
-    blob    = payload.get("data", {}) or {}
+    data    = resp.json().get("data", {}) or {}
+    sources = data.get("sources", [])
+    referer = data.get("referer", "")
 
-    # Try the usual key, then common alternates, then top-level list
-    sources = blob.get("sources") or blob.get("streams") or blob.get("videos")
-    if not sources:
-        if isinstance(blob, list):
-            sources = blob
-        else:
-            # log the entire JSON so you can see what shape it really is
-            logging.warning(
-                "No ‘sources’ found for %s\nURL: %s\nJSON: %r",
-                episode_id, resp.url, payload
-            )
-            sources = []
-
-    referer = blob.get("referer", "")
     return sources, referer
 
 
 def fetch_tracks(episode_id: str):
-    slug, params = _split_episode_id(episode_id)
-    url = f"{BASE}/episode/{slug}/tracks"
+    """
+    Pull subtitle tracks from the same /episode/sources endpoint,
+    since HiAnime returns "tracks" alongside "sources".
+    """
+    url = f"{BASE}/episode/sources"
+    params = {
+        "animeEpisodeId": episode_id,
+        "server":         "hd-2",
+        "category":       "sub"
+    }
 
     try:
         resp = requests.get(url, params=params, timeout=15)
@@ -145,6 +164,6 @@ def fetch_tracks(episode_id: str):
         logging.error("fetch_tracks failed for %r: %s", episode_id, e)
         return []
 
-    payload = resp.json()
-    tracks  = payload.get("data", []) or []
+    data   = resp.json().get("data", {}) or {}
+    tracks = data.get("tracks", []) or []
     return tracks
