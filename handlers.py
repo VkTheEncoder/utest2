@@ -78,7 +78,7 @@ async def register_handlers(client):
 
         try:
             eps = fetch_episodes(anime_id)
-        except Exception as e:
+        except Exception:
             logging.exception("Failed to fetch episodes")
             return await event.edit(
                 f"❌ Could not load episodes for **{anime_name}**",
@@ -153,7 +153,28 @@ async def _download_episode(client, chat_id, episode_id, ctx_event=None):
 
         # 1) Remux video
         sources, referer = fetch_sources_and_referer(episode_id)
-        m3u8     = sources[0].get("url") or sources[0].get("file")
+
+        # ——— Guard against no sources returned ———
+        if not sources:
+            logging.error("No video sources found for episode %s", episode_id)
+            await ctx_event.reply(
+                f"⚠️ Sorry, I couldn’t find any video sources for episode {ep_num}."
+            )
+            return
+
+        # ——— Pick the first source, but verify it has a URL or file ———
+        first_source = sources[0]
+        m3u8 = first_source.get("url") or first_source.get("file")
+        if not m3u8:
+            logging.error(
+                "Source entry missing 'url'/'file' for episode %s: %r",
+                episode_id, first_source
+            )
+            await ctx_event.reply(
+                f"⚠️ Found a source for episode {ep_num}, but it has no URL."
+            )
+            return
+
         out_mp4  = os.path.join(out_dir, f"{safe_name} ep-{ep_num}.mp4")
         await asyncio.get_event_loop().run_in_executor(
             None, remux_hls, m3u8, referer, out_mp4
@@ -196,6 +217,7 @@ async def _download_episode(client, chat_id, episode_id, ctx_event=None):
             f"❌ Failed downloading **{anime_name}** ep-{ep_num}"
         )
     finally:
+        # Clean up the “downloading…” status message
         await status.delete()
 
 
